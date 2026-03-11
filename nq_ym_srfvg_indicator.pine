@@ -176,16 +176,18 @@ if i_showSR
     if array.size(resistanceLevels) > 0
         for i = 0 to array.size(resistanceLevels) - 1
             lvl = array.get(resistanceLevels, i)
-            b = box.new(bar_index - 1, lvl + zoneHalf, bar_index + 20, lvl - zoneHalf, 
-                 bgcolor=i_srResColor, border_color=color.new(#FF5252, 50), border_width=1)
+            b = box.new(bar_index - 1, lvl + zoneHalf, bar_index + 500, lvl - zoneHalf, 
+                 bgcolor=i_srResColor, border_color=color.new(#FF5252, 50), border_width=1,
+                 extend=extend.right)
             array.push(srBoxes, b)
     
     // Draw support zones (only if array has data)
     if array.size(supportLevels) > 0
         for i = 0 to array.size(supportLevels) - 1
             lvl = array.get(supportLevels, i)
-            b = box.new(bar_index - 1, lvl + zoneHalf, bar_index + 20, lvl - zoneHalf, 
-                 bgcolor=i_srSupColor, border_color=color.new(#4CAF50, 50), border_width=1)
+            b = box.new(bar_index - 1, lvl + zoneHalf, bar_index + 500, lvl - zoneHalf, 
+                 bgcolor=i_srSupColor, border_color=color.new(#4CAF50, 50), border_width=1,
+                 extend=extend.right)
             array.push(srBoxes, b)
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -234,20 +236,25 @@ fib500 = fibHigh - fibRange * 0.500
 fib618 = fibHigh - fibRange * 0.618
 fib786 = fibHigh - fibRange * 0.786
 
-// Plot Fib levels with specified colors
-plot(i_showFib ? fib236 : na, "Fib 0.236", color=i_fib236Color, linewidth=1, style=plot.style_linebr)
-plot(i_showFib ? fib382 : na, "Fib 0.382", color=i_fib382Color, linewidth=1, style=plot.style_linebr)
-plot(i_showFib ? fib500 : na, "Fib 0.500", color=i_fib500Color, linewidth=2, style=plot.style_linebr)
-plot(i_showFib ? fib618 : na, "Fib 0.618", color=i_fib618Color, linewidth=1, style=plot.style_linebr)
-plot(i_showFib ? fib786 : na, "Fib 0.786", color=i_fib786Color, linewidth=1, style=plot.style_linebr)
+// Plot Fib levels with specified colors — ONLY when in an active trade (tradeDir != 0)
+// Fib levels are for trade management (TP zones) after entry, not general display
+showFibNow = i_showFib and tradeDir != 0
+plot(showFibNow ? fib236 : na, "Fib 0.236", color=i_fib236Color, linewidth=1, style=plot.style_linebr)
+plot(showFibNow ? fib382 : na, "Fib 0.382", color=i_fib382Color, linewidth=1, style=plot.style_linebr)
+plot(showFibNow ? fib500 : na, "Fib 0.500", color=i_fib500Color, linewidth=2, style=plot.style_linebr)
+plot(showFibNow ? fib618 : na, "Fib 0.618", color=i_fib618Color, linewidth=1, style=plot.style_linebr)
+plot(showFibNow ? fib786 : na, "Fib 0.786", color=i_fib786Color, linewidth=1, style=plot.style_linebr)
 
 // Fib level labels (right side of chart)
 var label lbl236 = na, var label lbl382 = na, var label lbl500 = na
 var label lbl618 = na, var label lbl786 = na
 
-if barstate.islast and i_showFib
+// Always clean up old fib labels; only redraw if in a trade
+if barstate.islast
     label.delete(lbl236), label.delete(lbl382), label.delete(lbl500)
     label.delete(lbl618), label.delete(lbl786)
+
+if barstate.islast and i_showFib and tradeDir != 0
     
     lbl236 := label.new(bar_index + 5, fib236, "0.236", color=color.new(color.black, 100), textcolor=i_fib236Color, style=label.style_label_left, size=size.small)
     lbl382 := label.new(bar_index + 5, fib382, "0.382", color=color.new(color.black, 100), textcolor=i_fib382Color, style=label.style_label_left, size=size.small)
