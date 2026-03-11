@@ -4,12 +4,19 @@
 // ══════════════════════════════════════════════════════════════════════════════
 // 
 // WHAT THIS DOES:
-//   1. Auto-detects Support/Resistance zones from pivot highs/lows
-//   2. Identifies and plots Fair Value Gaps (FVGs)
-//   3. Plots Fibonacci retracement levels with custom colors
-//   4. Generates Buy/Sell signals on S/R breakouts (time-gated to market open window)
-//   5. Auto-plots stop loss and 5 take-profit levels at Fib levels
-//   6. Displays R:R ratios for each TP level
+//   1. Detects S/R zones from pivot highs/lows during PRE-MARKET (9:00-9:30 ET)
+//   2. FREEZES those zones at market open — no new zones added after 9:30 ET
+//   3. Identifies and plots Fair Value Gaps (FVGs)
+//   4. Plots Fibonacci retracement levels with custom colors
+//   5. Generates Buy/Sell signals when price breaks frozen S/R zones (signal window)
+//   6. Auto-plots stop loss and 5 take-profit levels at Fib levels
+//   7. Displays R:R ratios for each TP level
+//
+// PRE-MARKET S/R FLOW:
+//   • 9:00-9:30 ET (configurable): Collect pivot highs/lows → build S/R zones
+//   • 9:30 ET: Zones FREEZE — visible all day, no new ones added
+//   • 9:30-10:30 ET (configurable): Breakout signals fire against frozen zones
+//   • Zones reset at midnight for the next trading day
 //
 // HOW TO ADD TO TRADINGVIEW:
 //   1. Open TradingView → Pine Editor (bottom panel)
@@ -30,7 +37,9 @@ indicator("NQ/YM S/R + FVG + Fib Signals", overlay=true, max_lines_count=500, ma
 
 // --- Market Session ---
 grpSession = "Market Session"
-i_marketOpenHour   = input.int(9, "Market Open Hour (ET)", minval=0, maxval=23, group=grpSession)
+i_preMarketStartHour   = input.int(9,  "Pre-Market Start Hour (ET)",   minval=0, maxval=23, group=grpSession, tooltip="S/R zone collection begins at this hour (ET). Default: 9:00 ET")
+i_preMarketStartMinute = input.int(0,  "Pre-Market Start Minute (ET)", minval=0, maxval=59, group=grpSession, tooltip="S/R zone collection begins at this minute. Default: 0 (i.e. 9:00 ET)")
+i_marketOpenHour   = input.int(9, "Market Open Hour (ET)", minval=0, maxval=23, group=grpSession, tooltip="Market opens at this hour — zones freeze, signals start firing")
 i_marketOpenMinute = input.int(30, "Market Open Minute (ET)", minval=0, maxval=59, group=grpSession)
 i_signalWindow     = input.int(60, "Signal Window After Open (minutes)", minval=5, maxval=240, group=grpSession, tooltip="Buy/Sell signals only fire within this many minutes after market open. Zones and FVGs remain visible all day.")
 
@@ -88,15 +97,26 @@ etHour   = hour(time, "America/New_York")
 etMinute = minute(time, "America/New_York")
 
 // Minutes since midnight ET
-barMinutesET  = etHour * 60 + etMinute
-openMinutesET = i_marketOpenHour * 60 + i_marketOpenMinute
-endMinutesET  = openMinutesET + i_signalWindow
+barMinutesET           = etHour * 60 + etMinute
+preMarketStartMinutesET = i_preMarketStartHour * 60 + i_preMarketStartMinute
+openMinutesET          = i_marketOpenHour * 60 + i_marketOpenMinute
+endMinutesET           = openMinutesET + i_signalWindow
+
+// Are we inside the pre-market data collection window?
+isInPreMarket = barMinutesET >= preMarketStartMinutesET and barMinutesET < openMinutesET
 
 // Are we inside the signal window?
 isInSignalWindow = barMinutesET >= openMinutesET and barMinutesET <= endMinutesET
 
 // Is this a new trading day? (detect when we cross midnight or session boundary)
 isNewDay = ta.change(time("D")) != 0
+
+// ── Pre-market pivot check ──────────────────────────────────────────────────
+// ta.pivothigh/pivotlow confirm the pivot i_srLookback bars AFTER it occurs.
+// We check the time of that pivot candle (bar_index - i_srLookback) to decide
+// whether it happened inside the pre-market window.
+pvtCandleMinutesET = hour(time[i_srLookback], "America/New_York") * 60 + minute(time[i_srLookback], "America/New_York")
+isPreMarketPivot   = pvtCandleMinutesET >= preMarketStartMinutesET and pvtCandleMinutesET < openMinutesET
 
 // ──────────────────────────────────────────────────────────────────────────────
 // SECTION 3: SUPPORT / RESISTANCE ZONES — Pivot-based detection
@@ -124,16 +144,21 @@ f_levelExists(_arr, _level) =>
                 break
     _exists
 
-// Add new resistance levels from pivot highs
-if not na(pvtHigh) and i_showSR
+// Reset S/R zones at the start of each new trading day so we get fresh pre-market zones
+if isNewDay
+    array.clear(resistanceLevels)
+    array.clear(supportLevels)
+
+// Add new resistance levels from pivot highs — ONLY if the pivot candle was in pre-market
+if not na(pvtHigh) and i_showSR and isPreMarketPivot
     if not f_levelExists(resistanceLevels, pvtHigh)
         // Trim to max zones
         if array.size(resistanceLevels) >= i_srMaxZones
             array.shift(resistanceLevels)
         array.push(resistanceLevels, pvtHigh)
 
-// Add new support levels from pivot lows
-if not na(pvtLow) and i_showSR
+// Add new support levels from pivot lows — ONLY if the pivot candle was in pre-market
+if not na(pvtLow) and i_showSR and isPreMarketPivot
     if not f_levelExists(supportLevels, pvtLow)
         if array.size(supportLevels) >= i_srMaxZones
             array.shift(supportLevels)
@@ -359,14 +384,15 @@ if barstate.islast and tradeDir != 0 and i_showRR and not na(entryPrice)
 // SECTION 8: SIGNAL WINDOW BACKGROUND — Visual indicator of active trading window
 // ──────────────────────────────────────────────────────────────────────────────
 
-// Subtle background color during the signal window
+// Subtle background color during pre-market collection and signal window
+bgcolor(isInPreMarket ? color.new(color.aqua, 95) : na, title="Pre-Market Collection")
 bgcolor(isInSignalWindow ? color.new(color.blue, 95) : na, title="Signal Window")
 
 // ──────────────────────────────────────────────────────────────────────────────
 // SECTION 9: INFO TABLE — Dashboard showing current state
 // ──────────────────────────────────────────────────────────────────────────────
 
-var table infoTable = table.new(position.top_right, 2, 7, bgcolor=color.new(#1a1a2e, 10), border_width=1, border_color=color.new(color.gray, 60))
+var table infoTable = table.new(position.top_right, 2, 8, bgcolor=color.new(#1a1a2e, 10), border_width=1, border_color=color.new(color.gray, 60))
 
 if barstate.islast
     table.cell(infoTable, 0, 0, "NQ/YM Indicator", text_color=color.white, text_size=size.small, bgcolor=color.new(#0f3460, 10))
@@ -375,22 +401,27 @@ if barstate.islast
     table.cell(infoTable, 0, 1, "Timeframe", text_color=color.gray, text_size=size.tiny)
     table.cell(infoTable, 1, 1, timeframe.period + "m", text_color=color.white, text_size=size.tiny)
     
-    table.cell(infoTable, 0, 2, "Signal Window", text_color=color.gray, text_size=size.tiny)
-    table.cell(infoTable, 1, 2, isInSignalWindow ? "🟢 ACTIVE" : "🔴 CLOSED", text_color=isInSignalWindow ? color.lime : color.red, text_size=size.tiny)
+    table.cell(infoTable, 0, 2, "S/R Phase", text_color=color.gray, text_size=size.tiny)
+    phaseText  = isInPreMarket ? "🔵 COLLECTING" : barMinutesET >= openMinutesET ? "🔒 FROZEN" : "⏳ WAITING"
+    phaseColor = isInPreMarket ? color.aqua : barMinutesET >= openMinutesET ? color.orange : color.gray
+    table.cell(infoTable, 1, 2, phaseText, text_color=phaseColor, text_size=size.tiny)
     
-    table.cell(infoTable, 0, 3, "S/R Zones", text_color=color.gray, text_size=size.tiny)
-    table.cell(infoTable, 1, 3, str.tostring(array.size(resistanceLevels)) + "R / " + str.tostring(array.size(supportLevels)) + "S", text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 0, 3, "Signal Window", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 3, isInSignalWindow ? "🟢 ACTIVE" : "🔴 CLOSED", text_color=isInSignalWindow ? color.lime : color.red, text_size=size.tiny)
     
-    table.cell(infoTable, 0, 4, "Tick Size", text_color=color.gray, text_size=size.tiny)
-    table.cell(infoTable, 1, 4, str.tostring(tickSize), text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 0, 4, "S/R Zones", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 4, str.tostring(array.size(resistanceLevels)) + "R / " + str.tostring(array.size(supportLevels)) + "S", text_color=color.white, text_size=size.tiny)
     
-    table.cell(infoTable, 0, 5, "SL Ticks", text_color=color.gray, text_size=size.tiny)
-    table.cell(infoTable, 1, 5, str.tostring(i_stopLossTicks), text_color=color.orange, text_size=size.tiny)
+    table.cell(infoTable, 0, 5, "Tick Size", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 5, str.tostring(tickSize), text_color=color.white, text_size=size.tiny)
+    
+    table.cell(infoTable, 0, 6, "SL Ticks", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 6, str.tostring(i_stopLossTicks), text_color=color.orange, text_size=size.tiny)
     
     tradeStatus = tradeDir == 1 ? "LONG" : tradeDir == -1 ? "SHORT" : "FLAT"
     tradeColor  = tradeDir == 1 ? color.lime : tradeDir == -1 ? color.red : color.gray
-    table.cell(infoTable, 0, 6, "Position", text_color=color.gray, text_size=size.tiny)
-    table.cell(infoTable, 1, 6, tradeStatus, text_color=tradeColor, text_size=size.tiny)
+    table.cell(infoTable, 0, 7, "Position", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 7, tradeStatus, text_color=tradeColor, text_size=size.tiny)
 
 // ──────────────────────────────────────────────────────────────────────────────
 // SECTION 10: ALERT CONDITIONS
