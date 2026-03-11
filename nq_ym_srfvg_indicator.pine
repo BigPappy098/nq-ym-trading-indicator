@@ -236,6 +236,10 @@ fib500 = fibHigh - fibRange * 0.500
 fib618 = fibHigh - fibRange * 0.618
 fib786 = fibHigh - fibRange * 0.786
 
+// Track trade direction early — needed for Fib display logic below
+// Full trade state (entry, SL, TP) is set in Section 7
+var int tradeDir = 0  // 1 = long, -1 = short, 0 = flat
+
 // Plot Fib levels with specified colors — ONLY when in an active trade (tradeDir != 0)
 // Fib levels are for trade management (TP zones) after entry, not general display
 showFibNow = i_showFib and tradeDir != 0
@@ -315,7 +319,7 @@ plotshape(sellSignal, "Sell Signal", shape.triangledown, location.abovebar, colo
 // Track active trade state for SL/TP plotting
 var float entryPrice   = na
 var float slPrice      = na
-var int   tradeDir     = 0  // 1 = long, -1 = short, 0 = flat
+// tradeDir is declared earlier (Section 5) because Fib plotting needs it
 var float tp1 = na, var float tp2 = na, var float tp3 = na
 var float tp4 = na, var float tp5 = na
 
