@@ -1,0 +1,406 @@
+// ══════════════════════════════════════════════════════════════════════════════
+// NQ/YM Futures Day Trading Indicator — S/R Zones, FVGs, Fib Levels & Signals
+// Pine Script v5 | Built for 5m and 15m charts
+// ══════════════════════════════════════════════════════════════════════════════
+// 
+// WHAT THIS DOES:
+//   1. Auto-detects Support/Resistance zones from pivot highs/lows
+//   2. Identifies and plots Fair Value Gaps (FVGs)
+//   3. Plots Fibonacci retracement levels with custom colors
+//   4. Generates Buy/Sell signals on S/R breakouts (time-gated to market open window)
+//   5. Auto-plots stop loss and 5 take-profit levels at Fib levels
+//   6. Displays R:R ratios for each TP level
+//
+// HOW TO ADD TO TRADINGVIEW:
+//   1. Open TradingView → Pine Editor (bottom panel)
+//   2. Delete any default code
+//   3. Paste this entire script
+//   4. Click "Add to Chart"
+//   5. Open indicator settings to configure inputs
+//   6. Apply to NQ1! or YM1! on 5m or 15m timeframe
+//
+// ══════════════════════════════════════════════════════════════════════════════
+
+//@version=5
+indicator("NQ/YM S/R + FVG + Fib Signals", overlay=true, max_lines_count=500, max_boxes_count=500, max_labels_count=500)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// SECTION 1: INPUTS — All configurable settings
+// ──────────────────────────────────────────────────────────────────────────────
+
+// --- Market Session ---
+grpSession = "Market Session"
+i_marketOpenHour   = input.int(9, "Market Open Hour (ET)", minval=0, maxval=23, group=grpSession)
+i_marketOpenMinute = input.int(30, "Market Open Minute (ET)", minval=0, maxval=59, group=grpSession)
+i_signalWindow     = input.int(60, "Signal Window After Open (minutes)", minval=5, maxval=240, group=grpSession, tooltip="Buy/Sell signals only fire within this many minutes after market open. Zones and FVGs remain visible all day.")
+
+// --- Support / Resistance ---
+grpSR = "Support / Resistance"
+i_showSR         = input.bool(true, "Show S/R Zones", group=grpSR)
+i_srLookback     = input.int(10, "S/R Pivot Lookback", minval=2, maxval=50, group=grpSR, tooltip="Number of bars left/right to confirm a pivot high/low")
+i_srZoneWidth    = input.float(0.15, "Zone Width (%)", minval=0.01, maxval=2.0, step=0.05, group=grpSR, tooltip="Width of S/R zone as % of price")
+i_srMaxZones     = input.int(8, "Max Zones to Show", minval=2, maxval=20, group=grpSR)
+i_srResColor     = input.color(color.new(#FF5252, 75), "Resistance Zone Color", group=grpSR)
+i_srSupColor     = input.color(color.new(#4CAF50, 75), "Support Zone Color", group=grpSR)
+
+// --- Fair Value Gaps ---
+grpFVG = "Fair Value Gaps"
+i_showFVG       = input.bool(true, "Show FVGs", group=grpFVG)
+i_fvgLookback   = input.int(50, "FVG Lookback (bars)", minval=10, maxval=200, group=grpFVG)
+i_fvgBullColor  = input.color(color.new(#2196F3, 80), "Bullish FVG Color", group=grpFVG)
+i_fvgBearColor  = input.color(color.new(#FF9800, 80), "Bearish FVG Color", group=grpFVG)
+i_fvgMaxBoxes   = input.int(10, "Max FVGs to Show", minval=2, maxval=30, group=grpFVG)
+
+// --- Fibonacci Levels ---
+grpFib = "Fibonacci Levels"
+i_showFib       = input.bool(true, "Show Fib Levels", group=grpFib)
+i_fibLookback   = input.int(50, "Fib Swing Lookback (bars)", minval=10, maxval=200, group=grpFib)
+i_fib236Color   = input.color(color.white, "0.236 Level Color", group=grpFib)
+i_fib382Color   = input.color(color.yellow, "0.382 Level Color", group=grpFib)
+i_fib500Color   = input.color(color.red, "0.500 Level Color", group=grpFib)
+i_fib618Color   = input.color(color.lime, "0.618 Level Color", group=grpFib)
+i_fib786Color   = input.color(color.teal, "0.786 Level Color", group=grpFib)
+
+// --- Risk Management ---
+grpRisk = "Risk Management"
+i_stopLossTicks  = input.int(25, "Stop Loss (ticks)", minval=1, maxval=200, group=grpRisk, tooltip="For NQ: 1 tick = 0.25 pts. For YM: 1 tick = 1 pt.")
+i_riskPct        = input.float(1.0, "Risk % of Account", minval=0.1, maxval=10.0, step=0.1, group=grpRisk)
+i_accountSize    = input.float(50000, "Account Size ($)", minval=1000, group=grpRisk)
+i_showRR         = input.bool(true, "Show R:R Ratios", group=grpRisk)
+i_showTP         = input.bool(true, "Show Take Profit Levels", group=grpRisk)
+i_showSL         = input.bool(true, "Show Stop Loss Level", group=grpRisk)
+
+// --- Alerts ---
+grpAlert = "Alerts"
+i_alertBreakout  = input.bool(true, "Alert on Breakout Signals", group=grpAlert)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// SECTION 2: TIME CALCULATIONS — Determine if we're in the signal window
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Convert current bar time to ET (UTC-5 standard, UTC-4 DST)
+// TradingView's `hour` and `minute` respect chart timezone, so we use
+// timestamp comparison for accuracy.
+
+// Build today's market open timestamp in ET (exchange timezone)
+// We use "America/New_York" via syminfo.timezone or manual offset
+etHour   = hour(time, "America/New_York")
+etMinute = minute(time, "America/New_York")
+
+// Minutes since midnight ET
+barMinutesET  = etHour * 60 + etMinute
+openMinutesET = i_marketOpenHour * 60 + i_marketOpenMinute
+endMinutesET  = openMinutesET + i_signalWindow
+
+// Are we inside the signal window?
+isInSignalWindow = barMinutesET >= openMinutesET and barMinutesET <= endMinutesET
+
+// Is this a new trading day? (detect when we cross midnight or session boundary)
+isNewDay = ta.change(time("D")) != 0
+
+// ──────────────────────────────────────────────────────────────────────────────
+// SECTION 3: SUPPORT / RESISTANCE ZONES — Pivot-based detection
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Detect pivot highs and lows with configurable lookback
+pvtHigh = ta.pivothigh(high, i_srLookback, i_srLookback)
+pvtLow  = ta.pivotlow(low, i_srLookback, i_srLookback)
+
+// Store S/R levels in arrays for dynamic management
+var float[] resistanceLevels = array.new_float(0)
+var float[] supportLevels    = array.new_float(0)
+var box[]   srBoxes          = array.new_box(0)
+
+// Zone half-width based on price
+zoneHalf = close * (i_srZoneWidth / 100) / 2
+
+// Check if a level already exists (within zone width) to avoid duplicates
+f_levelExists(_arr, _level) =>
+    _exists = false
+    if array.size(_arr) > 0
+        for i = 0 to array.size(_arr) - 1
+            if math.abs(array.get(_arr, i) - _level) < zoneHalf * 2
+                _exists := true
+                break
+    _exists
+
+// Add new resistance levels from pivot highs
+if not na(pvtHigh) and i_showSR
+    if not f_levelExists(resistanceLevels, pvtHigh)
+        // Trim to max zones
+        if array.size(resistanceLevels) >= i_srMaxZones
+            array.shift(resistanceLevels)
+        array.push(resistanceLevels, pvtHigh)
+
+// Add new support levels from pivot lows
+if not na(pvtLow) and i_showSR
+    if not f_levelExists(supportLevels, pvtLow)
+        if array.size(supportLevels) >= i_srMaxZones
+            array.shift(supportLevels)
+        array.push(supportLevels, pvtLow)
+
+// Clear and redraw S/R zone boxes each bar
+if i_showSR
+    // Remove old boxes (guard required: Pine Script v5 `for 0 to -1` still executes once)
+    if array.size(srBoxes) > 0
+        for i = 0 to array.size(srBoxes) - 1
+            box.delete(array.get(srBoxes, i))
+    array.clear(srBoxes)
+    
+    // Draw resistance zones (only if array has data)
+    if array.size(resistanceLevels) > 0
+        for i = 0 to array.size(resistanceLevels) - 1
+            lvl = array.get(resistanceLevels, i)
+            b = box.new(bar_index - 1, lvl + zoneHalf, bar_index + 20, lvl - zoneHalf, 
+                 bgcolor=i_srResColor, border_color=color.new(#FF5252, 50), border_width=1)
+            array.push(srBoxes, b)
+    
+    // Draw support zones (only if array has data)
+    if array.size(supportLevels) > 0
+        for i = 0 to array.size(supportLevels) - 1
+            lvl = array.get(supportLevels, i)
+            b = box.new(bar_index - 1, lvl + zoneHalf, bar_index + 20, lvl - zoneHalf, 
+                 bgcolor=i_srSupColor, border_color=color.new(#4CAF50, 50), border_width=1)
+            array.push(srBoxes, b)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// SECTION 4: FAIR VALUE GAPS — 3-candle imbalance detection
+// ──────────────────────────────────────────────────────────────────────────────
+// FVG = gap between candle 1's wick and candle 3's wick that candle 2 doesn't fill
+// Bullish FVG: low[0] > high[2]  (gap up — price skipped a zone)
+// Bearish FVG: high[0] < low[2]  (gap down — price skipped a zone)
+
+var box[] fvgBoxes = array.new_box(0)
+
+// Bullish FVG: current bar's low is above the high of 2 bars ago
+bullFVG = low > high[2] and i_showFVG
+// Bearish FVG: current bar's high is below the low of 2 bars ago  
+bearFVG = high < low[2] and i_showFVG
+
+if bullFVG
+    if array.size(fvgBoxes) >= i_fvgMaxBoxes
+        box.delete(array.shift(fvgBoxes))
+    b = box.new(bar_index - 2, low, bar_index + 10, high[2],
+         bgcolor=i_fvgBullColor, border_color=color.new(#2196F3, 50), border_width=1,
+         text="FVG", text_color=color.new(#2196F3, 40), text_size=size.tiny)
+    array.push(fvgBoxes, b)
+
+if bearFVG
+    if array.size(fvgBoxes) >= i_fvgMaxBoxes
+        box.delete(array.shift(fvgBoxes))
+    b = box.new(bar_index - 2, low[2], bar_index + 10, high,
+         bgcolor=i_fvgBearColor, border_color=color.new(#FF9800, 50), border_width=1,
+         text="FVG", text_color=color.new(#FF9800, 40), text_size=size.tiny)
+    array.push(fvgBoxes, b)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// SECTION 5: FIBONACCI RETRACEMENT LEVELS — Auto-detected swing high/low
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Find the highest high and lowest low within the lookback period
+fibHigh = ta.highest(high, i_fibLookback)
+fibLow  = ta.lowest(low, i_fibLookback)
+fibRange = fibHigh - fibLow
+
+// Calculate Fib levels (retracement from high)
+fib236 = fibHigh - fibRange * 0.236
+fib382 = fibHigh - fibRange * 0.382
+fib500 = fibHigh - fibRange * 0.500
+fib618 = fibHigh - fibRange * 0.618
+fib786 = fibHigh - fibRange * 0.786
+
+// Plot Fib levels with specified colors
+plot(i_showFib ? fib236 : na, "Fib 0.236", color=i_fib236Color, linewidth=1, style=plot.style_linebr)
+plot(i_showFib ? fib382 : na, "Fib 0.382", color=i_fib382Color, linewidth=1, style=plot.style_linebr)
+plot(i_showFib ? fib500 : na, "Fib 0.500", color=i_fib500Color, linewidth=2, style=plot.style_linebr)
+plot(i_showFib ? fib618 : na, "Fib 0.618", color=i_fib618Color, linewidth=1, style=plot.style_linebr)
+plot(i_showFib ? fib786 : na, "Fib 0.786", color=i_fib786Color, linewidth=1, style=plot.style_linebr)
+
+// Fib level labels (right side of chart)
+var label lbl236 = na, var label lbl382 = na, var label lbl500 = na
+var label lbl618 = na, var label lbl786 = na
+
+if barstate.islast and i_showFib
+    label.delete(lbl236), label.delete(lbl382), label.delete(lbl500)
+    label.delete(lbl618), label.delete(lbl786)
+    
+    lbl236 := label.new(bar_index + 5, fib236, "0.236", color=color.new(color.black, 100), textcolor=i_fib236Color, style=label.style_label_left, size=size.small)
+    lbl382 := label.new(bar_index + 5, fib382, "0.382", color=color.new(color.black, 100), textcolor=i_fib382Color, style=label.style_label_left, size=size.small)
+    lbl500 := label.new(bar_index + 5, fib500, "0.500", color=color.new(color.black, 100), textcolor=i_fib500Color, style=label.style_label_left, size=size.small)
+    lbl618 := label.new(bar_index + 5, fib618, "0.618", color=color.new(color.black, 100), textcolor=i_fib618Color, style=label.style_label_left, size=size.small)
+    lbl786 := label.new(bar_index + 5, fib786, "0.786", color=color.new(color.black, 100), textcolor=i_fib786Color, style=label.style_label_left, size=size.small)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// SECTION 6: TRADE SIGNALS — Breakout detection (time-gated)
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Determine tick size based on instrument
+// NQ tick = 0.25, YM tick = 1.0 — syminfo.mintick handles this automatically
+tickSize = syminfo.mintick
+stopLossPoints = i_stopLossTicks * tickSize
+
+// Track nearest S/R levels for breakout detection
+var float nearestRes = na
+var float nearestSup = na
+
+// Find the nearest resistance above price and support below price
+if array.size(resistanceLevels) > 0
+    _bestRes = float(na)
+    for i = 0 to array.size(resistanceLevels) - 1
+        _lvl = array.get(resistanceLevels, i)
+        if _lvl > close
+            if na(_bestRes) or _lvl < _bestRes
+                _bestRes := _lvl
+    nearestRes := _bestRes
+
+if array.size(supportLevels) > 0
+    _bestSup = float(na)
+    for i = 0 to array.size(supportLevels) - 1
+        _lvl = array.get(supportLevels, i)
+        if _lvl < close
+            if na(_bestSup) or _lvl > _bestSup
+                _bestSup := _lvl
+    nearestSup := _bestSup
+
+// Breakout conditions:
+// Buy  = close breaks above nearest resistance zone (close > zone upper edge)
+// Sell = close breaks below nearest support zone (close < zone lower edge)
+breakAboveRes = not na(nearestRes) and close > (nearestRes + zoneHalf) and close[1] <= (nearestRes + zoneHalf)
+breakBelowSup = not na(nearestSup) and close < (nearestSup - zoneHalf) and close[1] >= (nearestSup - zoneHalf)
+
+// Only fire signals inside the time window
+buySignal  = breakAboveRes and isInSignalWindow
+sellSignal = breakBelowSup and isInSignalWindow
+
+// Plot signal markers
+plotshape(buySignal, "Buy Signal", shape.triangleup, location.belowbar, color.lime, size=size.normal, text="BUY")
+plotshape(sellSignal, "Sell Signal", shape.triangledown, location.abovebar, color.red, size=size.normal, text="SELL")
+
+// ──────────────────────────────────────────────────────────────────────────────
+// SECTION 7: RISK MANAGEMENT — SL, TP levels, R:R display
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Track active trade state for SL/TP plotting
+var float entryPrice   = na
+var float slPrice      = na
+var int   tradeDir     = 0  // 1 = long, -1 = short, 0 = flat
+var float tp1 = na, var float tp2 = na, var float tp3 = na
+var float tp4 = na, var float tp5 = na
+
+// On new signal, set entry/SL/TP
+if buySignal
+    entryPrice := close
+    tradeDir   := 1
+    slPrice    := close - stopLossPoints
+    // TP at Fib extension levels from entry
+    tp1 := close + fibRange * 0.236
+    tp2 := close + fibRange * 0.382
+    tp3 := close + fibRange * 0.500
+    tp4 := close + fibRange * 0.618
+    tp5 := close + fibRange * 0.786
+
+if sellSignal
+    entryPrice := close
+    tradeDir   := -1
+    slPrice    := close + stopLossPoints
+    // TP at Fib extension levels from entry (downside)
+    tp1 := close - fibRange * 0.236
+    tp2 := close - fibRange * 0.382
+    tp3 := close - fibRange * 0.500
+    tp4 := close - fibRange * 0.618
+    tp5 := close - fibRange * 0.786
+
+// Reset on new day
+if isNewDay
+    entryPrice := na
+    slPrice    := na
+    tradeDir   := 0
+    tp1 := na, tp2 := na, tp3 := na, tp4 := na, tp5 := na
+
+// Plot SL and TP lines
+plot(i_showSL and tradeDir != 0 ? slPrice : na, "Stop Loss", color=color.new(color.red, 0), linewidth=2, style=plot.style_circles)
+plot(i_showTP and tradeDir != 0 ? tp1 : na, "TP1 (0.236)", color=i_fib236Color, linewidth=1, style=plot.style_cross)
+plot(i_showTP and tradeDir != 0 ? tp2 : na, "TP2 (0.382)", color=i_fib382Color, linewidth=1, style=plot.style_cross)
+plot(i_showTP and tradeDir != 0 ? tp3 : na, "TP3 (0.500)", color=i_fib500Color, linewidth=1, style=plot.style_cross)
+plot(i_showTP and tradeDir != 0 ? tp4 : na, "TP4 (0.618)", color=i_fib618Color, linewidth=1, style=plot.style_cross)
+plot(i_showTP and tradeDir != 0 ? tp5 : na, "TP5 (0.786)", color=i_fib786Color, linewidth=1, style=plot.style_cross)
+
+// R:R ratio labels (displayed on last bar when in a trade)
+var label lblRR = na
+
+if barstate.islast and tradeDir != 0 and i_showRR and not na(entryPrice)
+    label.delete(lblRR)
+    
+    riskAmt = math.abs(entryPrice - slPrice)
+    rr1 = riskAmt > 0 ? math.round(math.abs(tp1 - entryPrice) / riskAmt, 1) : 0.0
+    rr2 = riskAmt > 0 ? math.round(math.abs(tp2 - entryPrice) / riskAmt, 1) : 0.0
+    rr3 = riskAmt > 0 ? math.round(math.abs(tp3 - entryPrice) / riskAmt, 1) : 0.0
+    rr4 = riskAmt > 0 ? math.round(math.abs(tp4 - entryPrice) / riskAmt, 1) : 0.0
+    rr5 = riskAmt > 0 ? math.round(math.abs(tp5 - entryPrice) / riskAmt, 1) : 0.0
+    
+    // Position size calculation
+    riskDollars = i_accountSize * (i_riskPct / 100)
+    tickValue   = syminfo.pointvalue * tickSize  // $ per tick
+    posSize     = riskAmt > 0 ? math.floor(riskDollars / (riskAmt / tickSize * tickValue)) : 0
+    
+    dirTxt = tradeDir == 1 ? "LONG" : "SHORT"
+    rrText = dirTxt + " | Entry: " + str.tostring(entryPrice, format.mintick) + 
+             "\nSL: " + str.tostring(slPrice, format.mintick) + " (" + str.tostring(i_stopLossTicks) + " ticks)" +
+             "\nTP1: " + str.tostring(rr1) + "R | TP2: " + str.tostring(rr2) + "R" +
+             "\nTP3: " + str.tostring(rr3) + "R | TP4: " + str.tostring(rr4) + "R" +
+             "\nTP5: " + str.tostring(rr5) + "R" +
+             "\nRisk: $" + str.tostring(math.round(riskDollars)) + " | Contracts: " + str.tostring(posSize)
+    
+    lblRR := label.new(bar_index + 8, entryPrice, rrText,
+         color=color.new(tradeDir == 1 ? color.green : color.red, 85),
+         textcolor=color.white, style=label.style_label_left, size=size.small)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// SECTION 8: SIGNAL WINDOW BACKGROUND — Visual indicator of active trading window
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Subtle background color during the signal window
+bgcolor(isInSignalWindow ? color.new(color.blue, 95) : na, title="Signal Window")
+
+// ──────────────────────────────────────────────────────────────────────────────
+// SECTION 9: INFO TABLE — Dashboard showing current state
+// ──────────────────────────────────────────────────────────────────────────────
+
+var table infoTable = table.new(position.top_right, 2, 7, bgcolor=color.new(#1a1a2e, 10), border_width=1, border_color=color.new(color.gray, 60))
+
+if barstate.islast
+    table.cell(infoTable, 0, 0, "NQ/YM Indicator", text_color=color.white, text_size=size.small, bgcolor=color.new(#0f3460, 10))
+    table.cell(infoTable, 1, 0, syminfo.ticker, text_color=color.lime, text_size=size.small, bgcolor=color.new(#0f3460, 10))
+    
+    table.cell(infoTable, 0, 1, "Timeframe", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 1, timeframe.period + "m", text_color=color.white, text_size=size.tiny)
+    
+    table.cell(infoTable, 0, 2, "Signal Window", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 2, isInSignalWindow ? "🟢 ACTIVE" : "🔴 CLOSED", text_color=isInSignalWindow ? color.lime : color.red, text_size=size.tiny)
+    
+    table.cell(infoTable, 0, 3, "S/R Zones", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 3, str.tostring(array.size(resistanceLevels)) + "R / " + str.tostring(array.size(supportLevels)) + "S", text_color=color.white, text_size=size.tiny)
+    
+    table.cell(infoTable, 0, 4, "Tick Size", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 4, str.tostring(tickSize), text_color=color.white, text_size=size.tiny)
+    
+    table.cell(infoTable, 0, 5, "SL Ticks", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 5, str.tostring(i_stopLossTicks), text_color=color.orange, text_size=size.tiny)
+    
+    tradeStatus = tradeDir == 1 ? "LONG" : tradeDir == -1 ? "SHORT" : "FLAT"
+    tradeColor  = tradeDir == 1 ? color.lime : tradeDir == -1 ? color.red : color.gray
+    table.cell(infoTable, 0, 6, "Position", text_color=color.gray, text_size=size.tiny)
+    table.cell(infoTable, 1, 6, tradeStatus, text_color=tradeColor, text_size=size.tiny)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// SECTION 10: ALERT CONDITIONS
+// ──────────────────────────────────────────────────────────────────────────────
+
+alertcondition(buySignal and i_alertBreakout, title="Buy Breakout", message="🟢 BUY SIGNAL: {{ticker}} broke above resistance at {{close}} on {{interval}} chart")
+alertcondition(sellSignal and i_alertBreakout, title="Sell Breakout", message="🔴 SELL SIGNAL: {{ticker}} broke below support at {{close}} on {{interval}} chart")
+alertcondition(bullFVG, title="Bullish FVG", message="📊 Bullish FVG detected on {{ticker}} at {{close}}")
+alertcondition(bearFVG, title="Bearish FVG", message="📊 Bearish FVG detected on {{ticker}} at {{close}}")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// END OF INDICATOR
+// ══════════════════════════════════════════════════════════════════════════════
